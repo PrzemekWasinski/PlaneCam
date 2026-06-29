@@ -1,4 +1,7 @@
 config/home.yaml
-build
-images
-training_data
+
+build/
+
+images/
+
+*.txt

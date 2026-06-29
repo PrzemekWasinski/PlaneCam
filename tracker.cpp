@@ -15,12 +15,9 @@
 #include <sstream>
 #include <string>
 #include <sys/socket.h>
-#include <sys/statvfs.h>
-#include <sys/sysinfo.h>
 #include <thread>
 #include <unistd.h>
 #include <vector>
-#include <array>
 
 namespace fs = std::filesystem;
 
@@ -39,7 +36,6 @@ const int TILT_HORIZON_FRONT = 30;
 const int TILT_MID_FRONT     = 95;
 const int TILT_STRAIGHT_UP   = 155;
 const int TILT_FLIPPED_BACK  = 215;
-const int PWM_FREQ           = 50;
 const int PULSE_MIN_US       = 500;
 const int PULSE_MAX_US       = 2500;
 const int SERVO_INPUT_MAX    = 270;
@@ -49,9 +45,6 @@ const double BACK_MIN_TRACKABLE_ELEV_DEG  = 41.0;
 
 const char* OUTPUT_DIR = "images";
 const int SERVO_SETTLE_MS = 250;
-
-//ENABLE CAMERA
-const bool ENABLE_CAMERA_CAPTURE = true;
 
 std::atomic<bool> busy(false);
 std::atomic<bool> gpioReady(false);
@@ -136,16 +129,6 @@ struct ServoInputs {
     bool backMode;
 };
 
-struct RecognitionResult {
-    bool available = false;
-    bool containsAircraft = false;
-    double confidence = 0.0;
-    double rawScore = 0.0;
-    double scoreMargin = 0.0;
-    std::string label = "UNKNOWN";
-    std::string detail = "unavailable";
-    std::string predictor = "unknown";
-};
 
 ServoInputs computeServoInputs(double bearing, double elevDeg, double homeBearing, bool panClockwise) {
     ServoInputs r = {0, 0, false, false};
@@ -204,72 +187,6 @@ ServoInputs computeServoInputs(double bearing, double elevDeg, double homeBearin
     r.tilt  = tiltInput;
     r.valid = true;
     return r;
-}
-
-double readCpuUsagePercent() {
-    static unsigned long long prevIdle  = 0;
-    static unsigned long long prevTotal = 0;
-
-    std::ifstream statFile("/proc/stat");
-    std::string cpu;
-    unsigned long long user = 0, nice = 0, system = 0, idle = 0,
-                       iowait = 0, irq = 0, softirq = 0, steal = 0;
-    if (!(statFile >> cpu >> user >> nice >> system >> idle >> iowait >> irq >> softirq >> steal))
-        return 0.0;
-
-    unsigned long long idleAll  = idle + iowait;
-    unsigned long long total    = user + nice + system + idle + iowait + irq + softirq + steal;
-    if (prevTotal == 0 || total <= prevTotal) { prevIdle = idleAll; prevTotal = total; return 0.0; }
-
-    unsigned long long totalDiff = total    - prevTotal;
-    unsigned long long idleDiff  = idleAll  - prevIdle;
-    prevIdle  = idleAll;
-    prevTotal = total;
-    if (totalDiff == 0) return 0.0;
-    return 100.0 * (1.0 - static_cast<double>(idleDiff) / static_cast<double>(totalDiff));
-}
-
-double readTemperatureC() {
-    std::ifstream tempFile("/sys/class/thermal/thermal_zone0/temp");
-    double milliC = 0.0;
-    if (!(tempFile >> milliC)) return 0.0;
-    return milliC / 1000.0;
-}
-
-double readRamPercent() {
-    struct sysinfo info;
-    if (sysinfo(&info) != 0 || info.totalram == 0) return 0.0;
-    double total     = static_cast<double>(info.totalram) * info.mem_unit;
-    double available = static_cast<double>(info.freeram)  * info.mem_unit;
-    return 100.0 * (1.0 - (available / total));
-}
-
-double readDiskFreeGb() {
-    struct statvfs fsInfo;
-    if (statvfs("/", &fsInfo) != 0) return 0.0;
-    unsigned long long freeBytes =
-        static_cast<unsigned long long>(fsInfo.f_bavail) *
-        static_cast<unsigned long long>(fsInfo.f_frsize);
-    return static_cast<double>(freeBytes) / (1024.0 * 1024.0 * 1024.0);
-}
-
-std::string buildStatsResponse() {
-    std::ostringstream response;
-    response << std::fixed << std::setprecision(1)
-             << readTemperatureC()   << ","
-             << readRamPercent()     << ","
-             << readCpuUsagePercent()<< ","
-             << readDiskFreeGb();
-    return response.str();
-}
-
-// All gpioServo calls must go through this — never call gpioServo directly.
-void setServo(int pin, int servoInput) {
-    int pulseUs = PULSE_MIN_US + static_cast<int>(std::round(
-        static_cast<double>(servoInput) / SERVO_INPUT_MAX * (PULSE_MAX_US - PULSE_MIN_US)
-    ));
-    std::lock_guard<std::mutex> lock(servoMutex);
-    gpioServo(pin, pulseUs);
 }
 
 void stopServos() {
@@ -359,111 +276,6 @@ std::string makeTimestamp() {
     return ss.str();
 }
 
-fs::path currentExecutablePath() {
-    std::array<char, 4096> buffer{};
-    const ssize_t length = readlink("/proc/self/exe", buffer.data(), buffer.size() - 1);
-    if (length <= 0) return {};
-    buffer[static_cast<size_t>(length)] = '\0';
-    return fs::path(buffer.data());
-}
-
-std::vector<fs::path> candidatePredictorPaths() {
-    std::vector<fs::path> paths = {
-        fs::path("build/image_predict"),
-        fs::path("camera_module/build/image_predict"),
-        fs::path("../camera_module/build/image_predict"),
-        fs::path("../tests/image_recognition_test/build/predict"),
-        fs::path("tests/image_recognition_test/build/predict"),
-        fs::path("build/predict")
-    };
-
-    const fs::path exePath = currentExecutablePath();
-    if (!exePath.empty()) {
-        const fs::path exeDir = exePath.parent_path();
-        paths.push_back(exeDir / "image_predict");
-        paths.push_back(exeDir / "predict");
-        paths.push_back(exeDir.parent_path() / "camera_module" / "build" / "image_predict");
-        paths.push_back(exeDir.parent_path() / "tests" / "image_recognition_test" / "build" / "predict");
-    }
-
-    return paths;
-}
-
-std::string extractTokenValue(const std::string& text, const std::string& key) {
-    const std::string needle = key + "=";
-    const size_t start = text.find(needle);
-    if (start == std::string::npos) return "";
-    const size_t valueStart = start + needle.size();
-    const size_t valueEnd = text.find_first_of(" \r\n", valueStart);
-    if (valueEnd == std::string::npos) return text.substr(valueStart);
-    return text.substr(valueStart, valueEnd - valueStart);
-}
-
-RecognitionResult classifyCapturedImage(const fs::path& imagePath) {
-    RecognitionResult result;
-
-    fs::path predictorPath;
-    for (const auto& candidate : candidatePredictorPaths()) {
-        std::error_code error;
-        const fs::path normalized = fs::weakly_canonical(candidate, error);
-        const fs::path resolved = error ? candidate : normalized;
-        if (fs::exists(resolved)) {
-            predictorPath = resolved;
-            result.predictor = resolved.filename().string();
-            break;
-        }
-    }
-
-    if (predictorPath.empty()) {
-        result.detail = "predictor_missing";
-        return result;
-    }
-
-    std::ostringstream command;
-    command << shellQuote(predictorPath.string()) << " " << shellQuote(imagePath.string()) << " 2>&1";
-    FILE* pipe = popen(command.str().c_str(), "r");
-    if (pipe == nullptr) {
-        result.detail = "predictor_launch_failed";
-        return result;
-    }
-
-    std::string output;
-    std::array<char, 512> buffer{};
-    while (fgets(buffer.data(), static_cast<int>(buffer.size()), pipe) != nullptr) {
-        output += buffer.data();
-    }
-    const int exitCode = pclose(pipe);
-    if (exitCode != 0) {
-        result.detail = "predictor_failed";
-        return result;
-    }
-
-    if (output.find("AIRCRAFT") != std::string::npos) {
-        result.available = true;
-        result.containsAircraft = true;
-        result.label = "AIRCRAFT";
-    } else if (output.find("SKY") != std::string::npos) {
-        result.available = true;
-        result.containsAircraft = false;
-        result.label = "SKY";
-    } else {
-        result.detail = "prediction_unparsed";
-        return result;
-    }
-
-    try {
-        const std::string confidenceText = extractTokenValue(output, "confidence");
-        const std::string rawScoreText = extractTokenValue(output, "raw_score");
-        if (!confidenceText.empty()) result.confidence = std::stod(confidenceText);
-        if (!rawScoreText.empty()) result.rawScore = std::stod(rawScoreText);
-        result.scoreMargin = std::abs(result.rawScore);
-    } catch (...) {
-    }
-
-    result.detail = "ok";
-    return result;
-}
-
 bool captureImage(const fs::path& outputPath) {
     std::error_code error;
     fs::create_directories(outputPath.parent_path(), error);
@@ -490,15 +302,7 @@ bool captureImage(const fs::path& outputPath) {
     return false;
 }
 
-bool sendImageResponse(
-    int clientSocket,
-    const fs::path& imagePath,
-    const RecognitionResult& recognition,
-    const ServoInputs& servo,
-    double bearing,
-    double elev,
-    double distance,
-    double alt) {
+bool sendImageResponse(int clientSocket, const fs::path& imagePath, const ServoInputs& servo) {
     std::error_code error;
     const auto imageSize = fs::file_size(imagePath, error);
     if (error || imageSize == 0)
@@ -509,29 +313,11 @@ bool sendImageResponse(
         return sendLine(clientSocket, "ERROR image_open_failed\n");
 
     std::ostringstream header;
-    header << "IMAGE " << imageSize;
-    header << std::fixed << std::setprecision(4);
-    header << " bearing_deg=" << bearing
-           << " elev_deg=" << elev
-           << " distance_m=" << distance
-           << " alt_m=" << alt
+    header << "IMAGE " << imageSize
+           << " status=free"
            << " pan=" << servo.pan
            << " tilt=" << servo.tilt
-           << " mode=" << (servo.backMode ? "back" : "front");
-
-    if (recognition.available) {
-        header << " label=" << recognition.label
-               << " aircraft=" << (recognition.containsAircraft ? "yes" : "no")
-               << " confidence=" << recognition.confidence
-               << " raw_score=" << recognition.rawScore
-               << " score_margin=" << recognition.scoreMargin
-               << " detail=" << recognition.detail
-               << " predictor=" << recognition.predictor;
-    } else {
-        header << " label=UNKNOWN aircraft=unknown detail=" << recognition.detail
-               << " predictor=" << recognition.predictor;
-    }
-    header << "\n";
+           << "\n";
     if (!sendLine(clientSocket, header.str())) return false;
 
     std::vector<char> buffer(8192);
@@ -588,12 +374,6 @@ void trackPlane(const std::string& hexCode, double lat, double lon, double alt,
     applyAndHoldServos(servo.pan, servo.tilt);
     std::this_thread::sleep_for(std::chrono::milliseconds(SERVO_SETTLE_MS));
 
-    if (!ENABLE_CAMERA_CAPTURE) {
-        sendLine(clientSocket, "OK tracking_only\n");
-        finishRequest(clientSocket);
-        return;
-    }
-
     const fs::path outputPath =
         fs::path(OUTPUT_DIR) / (sanitizeHexCode(hexCode) + "_" + makeTimestamp() + ".jpg");
 
@@ -603,15 +383,7 @@ void trackPlane(const std::string& hexCode, double lat, double lon, double alt,
         return;
     }
 
-    const RecognitionResult recognition = classifyCapturedImage(outputPath);
-    std::cout << "Recognition: available=" << (recognition.available ? "true" : "false")
-              << ", label=" << recognition.label
-              << ", aircraft=" << (recognition.containsAircraft ? "yes" : "no")
-              << ", confidence=" << recognition.confidence
-              << ", raw_score=" << recognition.rawScore
-              << ", detail=" << recognition.detail << "\n";
-
-    if (!sendImageResponse(clientSocket, outputPath, recognition, servo, bearing, elev, distance, alt))
+    if (!sendImageResponse(clientSocket, outputPath, servo))
         std::cerr << "Failed to send image response\n";
 
     finishRequest(clientSocket);
@@ -671,12 +443,6 @@ int main() {
         if (bytesRead <= 0) { close(newSocket); continue; }
 
         const std::string request = trim(std::string(buffer, bytesRead));
-        if (request == "stats") {
-            sendLine(newSocket, buildStatsResponse());
-            close(newSocket);
-            continue;
-        }
-
         std::cout << "Incoming request: " << request << "\n";
 
         char hexBuffer[64] = {0};
