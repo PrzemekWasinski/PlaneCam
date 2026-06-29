@@ -21,15 +21,13 @@
 
 namespace fs = std::filesystem;
 
-//SERVO PINS
+//Servo pins
 const int PAN_PIN  = 18;
 const int TILT_PIN = 19;
 
-//SERVO CALIBRATION
-// Pan still uses the full 0..270 servo range.
-// Tilt is calibrated from field testing:
-//   front hemisphere: 30 = horizon, 95 = about 41 deg up, 155 = straight up
-//   flipped-back hemisphere: 215 = about 41 deg up on the back side
+//Servo calibration
+//Tilt calibrated from field testing
+//Front 30 horizon 95 mid 155 straight up back 215 flipped
 const int TILT_INPUT_MIN     = 30;
 const int TILT_INPUT_MAX     = 215;
 const int TILT_HORIZON_FRONT = 30;
@@ -51,7 +49,7 @@ std::atomic<bool> gpioReady(false);
 std::atomic<bool> holdActive(false);
 std::atomic<int>  heldPanInput(0);
 std::atomic<int>  heldTiltInput(0);
-std::mutex        servoMutex;  // <-- NEW: guards all gpioServo calls
+std::mutex        servoMutex; //Mutex guards all gpioServo calls
 
 struct HomeConfig {
     double lat           = 0.0;
@@ -195,18 +193,17 @@ void stopServos() {
     gpioServo(TILT_PIN, 0);
 }
 
-// Only update the target values — the hold loop drives the hardware.
+//Only update target values the hold loop drives hardware
 void applyAndHoldServos(int panInput, int tiltInput) {
     heldPanInput.store(panInput);
     heldTiltInput.store(tiltInput);
-    holdActive.store(true);   // hold loop will pick these up on its next tick
+    holdActive.store(true); //Hold loop picks this up on next tick
 }
 
 void servoHoldLoop() {
     while (gpioReady.load()) {
         if (holdActive.load()) {
-            // Snapshot both atomics under a single mutex acquisition so pan
-            // and tilt are always written as a matched pair.
+            //Snapshot both atomics so pan and tilt write as a pair
             int pan  = heldPanInput.load();
             int tilt = heldTiltInput.load();
 

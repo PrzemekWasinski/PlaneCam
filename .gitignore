@@ -3,5 +3,3 @@ config/home.yaml
 build/
 
 images/
-
-*.txt
